@@ -5,12 +5,38 @@ ml_forecaster.py — Machine Learning Price Forecasting (Pillar 1)
 Uses gradient boosted trees (XGBoost) and Random Forest to forecast
 next-hour electricity prices from engineered tabular features.
 
-This module demonstrates that for structured, tabular data with known
-temporal patterns, classical ML often matches or beats deep learning —
-a key lesson for IEOR students.
+WHAT THIS MODULE DOES
+---------------------
+Given a history of hourly electricity prices (e.g., the past 365 days),
+it engineers a rich set of tabular features (lag prices, rolling statistics,
+cyclical time encodings, peak-period indicators) and trains two gradient
+boosting models to predict the *next* hour's price.
 
-Student TODOs are marked with ★. The provided implementations are
-complete and runnable; students can improve them.
+WHY TABULAR ML (NOT JUST DEEP LEARNING)?
+-----------------------------------------
+Electricity price follows strong, regular patterns: overnight lows, midday
+solar dips, and evening peaks repeat with high consistency. These patterns
+map naturally onto hand-crafted features that tree-based models exploit well.
+On this type of structured, feature-rich tabular data, XGBoost and Random
+Forest often match or outperform LSTM — which must learn the same patterns
+from scratch. This module demonstrates that "the right tool depends on the
+data, not the hype."
+
+INPUT → OUTPUT
+--------------
+  Input:  A DataFrame of hourly electricity prices with metadata columns
+          (datetime, price_mwh, hour, day_of_week, month, is_weekend).
+  Output: Predicted price for the *next* hour (scalar), trained on the
+          engineering features derived from the price history.
+
+  Crucially, target = price[t+1] and features are all derived from
+  price[t] and earlier — no lookahead bias.
+
+STUDENT WORK
+------------
+Students improve upon this baseline in main.ipynb by writing their own
+feature engineering function and/or tuning hyperparameters. The .py file
+itself is provided infrastructure; do not modify it directly.
 
 IEOR E4010: AI for Operations Research and Financial Engineering
 Columbia University, Spring 2026
@@ -44,16 +70,29 @@ def engineer_features(
 ) -> pd.DataFrame:
     """Engineer features for price forecasting from raw price data.
 
-    ★ STUDENT TODO: Improve or extend this feature engineering pipeline.
-    
-    Ideas to try:
-    - Add more lag features (t-2, t-3, t-12, t-48)
-    - Add rolling statistics with different windows
-    - Add price change features (returns, momentum)
-    - Add interaction features (hour × is_weekend)
-    - Add Fourier features for cyclical encoding of time
-    - Add exponentially weighted moving averages
-    - Try polynomial features of existing ones
+    FEATURE CATEGORIES
+    ------------------
+    1. Cyclical time encodings (sin/cos of hour, day-of-week, month):
+       Rather than treating hour=23 as "far from" hour=0, sine/cosine
+       transforms put adjacent hours close together in feature space.
+
+    2. Lag features (price at t-1, t-2, t-3, t-6, t-12, t-24, t-168):
+       Yesterday's same-hour price and last-week's same-hour price are
+       typically the strongest predictors of tomorrow's price.
+
+    3. Rolling statistics (mean/std over 6h, 24h, 168h windows):
+       Capture recent price level and volatility.
+
+    4. Price change features (1h and 24h differences):
+       Momentum indicators — is the price currently rising or falling?
+
+    5. Peak period indicators (is_peak, is_solar, is_overnight):
+       Binary flags for electricity market structural periods.
+
+    TARGET: price[t+1] — the next hour's price.
+    All features are computed from price[t] and earlier, so there is
+    no lookahead bias. Rows with NaN (due to lags at the start of the
+    dataset) are dropped.
 
     Args:
         df:  DataFrame with columns: price_mwh, hour, day_of_week, month, is_weekend
@@ -125,14 +164,16 @@ def train_ml_models(
 ) -> Dict[str, Any]:
     """Train XGBoost and Random Forest models.
 
-    ★ STUDENT TODO: Tune hyperparameters to improve performance.
-    
-    Ideas to try:
-    - Grid search or random search over hyperparameters
-    - Adjust n_estimators, max_depth, learning_rate
-    - Try different min_samples_leaf / min_child_weight
-    - Experiment with subsample ratios
-    - Compare with other models (LightGBM, CatBoost, Ridge, etc.)
+    Trains two models on the same feature set:
+    - XGBoost (or sklearn GradientBoosting as fallback): a sequential
+      ensemble of shallow trees where each tree corrects the residual
+      errors of the previous. The learning_rate and n_estimators jointly
+      control the bias-variance trade-off.
+    - Random Forest: a parallel ensemble of deep trees trained on random
+      feature subsets. Typically lower variance but higher bias than GBM.
+
+    Hyperparameter defaults are set conservatively to work well out-of-the-box.
+    Students can improve results by tuning via grid or random search.
 
     Args:
         train_df: DataFrame with engineered features and target
@@ -254,12 +295,17 @@ def get_feature_importance(
 ) -> pd.DataFrame:
     """Extract and rank feature importances.
 
-    ★ STUDENT TODO: Analyze which features matter most.
-    
-    Questions to answer:
-    - Which lag feature is most important?
-    - Do cyclical time features beat raw hour/month?
-    - How important are rolling statistics?
+    Feature importance in tree models measures how much each feature
+    reduces prediction error across all splits in all trees. High
+    importance on lag_1 means "last hour's price is the best predictor
+    of next hour's price," which aligns with electricity market intuition.
+
+    When analyzing results, consider:
+    - Are short-lag features (lag_1, lag_2) dominant? (autocorrelation)
+    - Do same-hour-yesterday / last-week features rank highly? (seasonality)
+    - Do rolling stats add information beyond the raw lags?
+    - How much do cyclical time features (hour_sin/cos) contribute vs.
+      peak-period indicator flags?
 
     Args:
         models_dict: Output from train_ml_models()
@@ -387,6 +433,50 @@ def predict_next_24h(
         prices_buffer.append(pred)
 
     return np.array(predictions)
+
+
+# ============================================================
+# Model Persistence (Save / Load)
+# ============================================================
+def save_ml_model(models_dict: Dict[str, Any], path: str = "submission/ml_model.pkl") -> None:
+    """Save trained ML models and feature metadata to disk.
+
+    Saves the complete models_dict (models + feature_columns + train_size)
+    using joblib. The saved file can be loaded with load_ml_model() and
+    evaluated on any dataset that has the same feature columns.
+
+    Args:
+        models_dict: Output from train_ml_models()
+        path:        Save path (e.g., "submission/ml_model.pkl")
+    """
+    import joblib
+    import os
+
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    joblib.dump(models_dict, path)
+    size_mb = os.path.getsize(path) / 1024 / 1024
+    print(f"ML model saved to '{path}' ({size_mb:.1f} MB)")
+    print(f"  Models: {list(models_dict['models'].keys())}")
+    print(f"  Features: {len(models_dict['feature_columns'])}")
+    print(f"  Trained on: {models_dict['train_size']:,} samples")
+
+
+def load_ml_model(path: str = "submission/ml_model.pkl") -> Dict[str, Any]:
+    """Load a saved ML model from disk.
+
+    Args:
+        path: Path to the saved .pkl file
+
+    Returns:
+        models_dict compatible with evaluate_ml_models() and predict_next_24h()
+    """
+    import joblib
+
+    models_dict = joblib.load(path)
+    print(f"ML model loaded from '{path}'")
+    print(f"  Models: {list(models_dict['models'].keys())}")
+    print(f"  Features: {len(models_dict['feature_columns'])}")
+    return models_dict
 
 
 # ============================================================

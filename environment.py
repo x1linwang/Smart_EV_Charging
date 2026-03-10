@@ -4,32 +4,73 @@ environment.py — Gymnasium Environment for EV Fleet V2G Charging
 
 A Gymnasium-compatible environment that simulates the depot overnight
 charging problem. The agent controls charging/discharging power for
-each EV at every 15-minute time step, subject to:
+each EV at every 15-minute time step, subject to physical and operational
+constraints.
 
-- Transformer capacity constraint (aggregate power limit)
-- Per-EV charge/discharge rate limits
-- Battery SoC bounds [10%, 100%]
-- Departure deadline constraints (SoC ≥ target by departure)
-- V2G degradation costs
+ENVIRONMENT OVERVIEW
+--------------------
+The environment wraps a 24-hour charging scenario (96 × 15-minute steps)
+into the standard gym.Env interface. Each episode represents one night
+at the fleet depot. The RL agent interacts via:
+    obs, info = env.reset()
+    action = agent.predict(obs)
+    obs, reward, done, _, info = env.step(action)
 
-State Space:
-    For each EV: [current_soc, time_until_departure, is_connected]
-    Global:      [current_time_step, current_price, total_load_fraction]
-    → Total: 3 * num_evs + 3
+STATE SPACE (63-dimensional continuous vector)
+----------------------------------------------
+For each of the 20 EVs (60 values total):
+  [3i+0] current_soc       — current battery level [0.0, 1.0]
+  [3i+1] time_to_depart    — fraction of plug-in window remaining [0, 1]
+                              (1 = just arrived, 0 = about to depart)
+  [3i+2] is_connected      — 1 if EV is currently plugged in, else 0
 
-Action Space:
-    Continuous [-1, +1] per connected EV
-    -1 = discharge at max rate (V2G)
-     0 = idle
-    +1 = charge at max rate
-    → Shape: (num_evs,)
+Global state (3 values):
+  [60]   norm_time          — fraction of the day elapsed [0, 1]
+  [61]   norm_price         — current electricity price / max observed price
+  [62]   load_fraction      — previous step's total power / transformer limit
 
-Reward:
-    - Electricity cost (price × power × Δt)
-    + V2G revenue (price × discharge × Δt)
-    - Degradation penalty (cost_per_kwh × energy discharged)
-    - Deadline miss penalty (large penalty per EV)
-    - Overload penalty (if total power > transformer limit)
+IMPORTANT: The agent sees the CURRENT price but NOT future prices. This
+is what distinguishes RL from the LP optimizer (which has perfect foresight).
+The agent must learn to anticipate future high prices from the time-of-day
+signal (norm_time) alone.
+
+ACTION SPACE (20-dimensional continuous vector)
+-----------------------------------------------
+One action per EV, clipped to [-1, +1]:
+  +1.0 → charge at full rate (max_charge_kw, e.g., 11 kW)
+   0.0 → idle (no power exchange)
+  -1.0 → discharge at full rate (max_discharge_kw = 11 kW, V2G mode)
+  Values between -1 and +1 scale the power linearly.
+  Actions for disconnected EVs are automatically zeroed out.
+
+TRANSFORMER CONSTRAINT ENFORCEMENT
+-----------------------------------
+If the sum of all charging powers exceeds the 150 kW transformer limit,
+all charging actions are *proportionally scaled down* to exactly hit the
+limit. This is a soft projection, not a hard action clipping — meaning the
+agent can request more power than available and the environment handles it.
+The same applies to total V2G discharge.
+
+REWARD FUNCTION (baseline)
+---------------------------
+  reward = -price_weight × step_cost - deadline_penalty - overload_penalty
+
+  where step_cost = charging_cost - v2g_revenue + degradation_cost
+
+  Penalty triggers:
+  - deadline_penalty: fires at the moment an EV's departure_step is reached
+    if its SoC < target_soc. Magnitude = penalty_weight × shortfall fraction.
+  - overload_penalty: fires if total power exceeds transformer limit after
+    the proportional scaling (can happen due to floating-point rounding).
+
+  A custom reward function can be passed to make_env() / EVChargingEnv()
+  to override this behavior. See the custom_reward_fn parameter.
+
+EPISODE TERMINATION
+-------------------
+An episode ends (terminated=True) after exactly 96 steps (one full day).
+No early termination. The final deadline check fires at step 96 for any
+EVs whose scheduled departure is at or after step 96.
 
 IEOR E4010: AI for Operations Research and Financial Engineering
 Columbia University, Spring 2026
@@ -65,14 +106,24 @@ class EVChargingEnv(gym.Env):
         schedules: Optional[List[EVSchedule]] = None,
         price_curve: Optional[np.ndarray] = None,
         render_mode: Optional[str] = None,
+        custom_reward_fn=None,
     ):
         """Initialize the EV charging environment.
 
         Args:
-            cfg:         Configuration object
-            schedules:   Pre-generated EV schedules (or None to auto-generate)
-            price_curve: Pre-generated price curve (or None to auto-generate)
-            render_mode: Rendering mode ("human" for text output)
+            cfg:              Configuration object
+            schedules:        Pre-generated EV schedules (or None to auto-generate
+                              fresh random schedules each episode)
+            price_curve:      Pre-generated price curve (or None to auto-generate
+                              a random day from synthetic prices each episode)
+            render_mode:      Rendering mode ("human" for text output per step)
+            custom_reward_fn: Optional callable with signature:
+                                fn(step_cost, deadline_penalty, overload_penalty,
+                                   charging_energy, discharging_energy,
+                                   soc_array, cfg, current_step, price) -> float
+                              If provided, replaces the default reward formula.
+                              Students implement this in main.ipynb to experiment
+                              with reward shaping without modifying this file.
         """
         super().__init__()
 
@@ -80,6 +131,7 @@ class EVChargingEnv(gym.Env):
         self.render_mode = render_mode
         self._schedules_provided = schedules
         self._price_curve_provided = price_curve
+        self._custom_reward_fn = custom_reward_fn
 
         # Shortcuts
         self.num_evs = cfg.fleet.num_evs
@@ -309,28 +361,36 @@ class EVChargingEnv(gym.Env):
 
         # ----------------------------------------------------------
         # 8. Compose reward
+        #
+        # DEFAULT: weighted sum of electricity cost + constraint penalties.
+        #   reward = -(price_weight × step_cost) - deadline_penalty - overload_penalty
+        #
+        # The intuition:
+        #   - step_cost = electricity bought - V2G sold + battery degradation
+        #   - deadline_penalty fires when an EV departs below target SoC
+        #   - overload_penalty fires when transformer limit is exceeded
+        #
+        # If a custom_reward_fn was provided at construction time (e.g., by
+        # a student in the notebook), use that instead of the default.
         # ----------------------------------------------------------
-        # ================================================================
-        # TODO (Student): Modify the reward function!
-        #
-        # The reward function encodes what the agent optimizes for.
-        # The current formulation is a weighted sum of:
-        #   - Electricity cost (minimize)
-        #   - Deadline penalties (hard constraint via large penalty)
-        #   - Overload penalties (hard constraint via large penalty)
-        #
-        # Experiment ideas:
-        #   - Change the penalty magnitudes
-        #   - Add a reward for achieving higher-than-minimum SoC
-        #   - Add a term that rewards smooth power profiles
-        #   - Add a term based on how much V2G revenue was earned
-        #   - Change from weighted sum to lexicographic priorities
-        # ================================================================
-        reward = (
-            - self.cfg.rl.reward_price_weight * step_cost
-            - deadline_penalty
-            - overload_penalty
-        )
+        if self._custom_reward_fn is not None:
+            reward = float(self._custom_reward_fn(
+                step_cost=step_cost,
+                deadline_penalty=deadline_penalty,
+                overload_penalty=overload_penalty,
+                charging_energy=charging_energy,
+                discharging_energy=discharging_energy,
+                soc_array=self.soc.copy(),
+                cfg=self.cfg,
+                current_step=self.current_step,
+                price=price,
+            ))
+        else:
+            reward = (
+                - self.cfg.rl.reward_price_weight * step_cost
+                - deadline_penalty
+                - overload_penalty
+            )
 
         # Log actions for analysis
         self.episode_actions_log.append(power_kw.copy())
@@ -494,17 +554,21 @@ class EVChargingEnv(gym.Env):
 # ============================================================
 # Environment Registration
 # ============================================================
-def make_env(cfg: Config = DEFAULT_CONFIG, **kwargs) -> EVChargingEnv:
+def make_env(cfg: Config = DEFAULT_CONFIG, custom_reward_fn=None, **kwargs) -> EVChargingEnv:
     """Factory function to create the environment.
 
     Args:
-        cfg:    Configuration object
-        **kwargs: Additional arguments passed to EVChargingEnv
+        cfg:              Configuration object
+        custom_reward_fn: Optional custom reward function (see EVChargingEnv
+                          docstring for the expected signature). Students pass
+                          their reward function here when training a custom agent.
+        **kwargs:         Additional arguments passed to EVChargingEnv
+                          (schedules, price_curve, render_mode)
 
     Returns:
         EVChargingEnv instance
     """
-    return EVChargingEnv(cfg=cfg, **kwargs)
+    return EVChargingEnv(cfg=cfg, custom_reward_fn=custom_reward_fn, **kwargs)
 
 
 # ============================================================

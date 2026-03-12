@@ -3,17 +3,52 @@ rl_agent.py — Reinforcement Learning Agent (Pillar 3)
 ======================================================
 
 Trains a PPO (Proximal Policy Optimization) agent using Stable-Baselines3
-to learn a charging policy through trial and error in the simulation.
+to learn a charging policy through trial and error in the EVChargingEnv.
 
-The RL agent sees only the current state (SoC, prices, time) — it has
-NO knowledge of future prices or arrivals. It must learn to anticipate
-patterns from experience, unlike the LP optimizer which has perfect
-foresight.
+WHY REINFORCEMENT LEARNING?
+----------------------------
+Unlike the LP optimizer (which requires knowing all future prices) and the
+ML/DL forecasters (which only predict prices, not directly make charging
+decisions), the RL agent learns a *direct policy*: given the current state
+(SoC levels, time remaining, current price), output charging decisions.
 
-The gap between RL and LP optimal = "the cost of uncertainty."
-RL vs. heuristics = "the value of learning."
+The agent learns by running thousands of simulated charging episodes and
+receiving a scalar reward signal. Over time, it discovers patterns like:
+"charge aggressively at night (low price), reduce charging at 6-8 PM
+(peak price), use V2G to discharge when price spikes."
 
-Student TODOs are marked with ★.
+KEY INSIGHT: THE COST OF UNCERTAINTY
+--------------------------------------
+The LP optimizer solves a mathematical program knowing all 96 future price
+values — it achieves the theoretical minimum cost. The RL agent only sees the
+*current* price and must learn to anticipate future prices from the time-of-day
+signal. The gap between their costs = "the value of perfect information."
+This gap has real economic significance: it represents how much a depot would
+pay for a reliable 24-hour price forecast.
+
+  LP cost (perfect foresight) ≤ RL cost (learned heuristic) ≤ ASAP cost (no optimization)
+
+PPO ALGORITHM OVERVIEW
+-----------------------
+PPO is an actor-critic algorithm. Two neural networks are trained jointly:
+  - Policy (actor) π(a|s):   maps state → action distribution (Gaussian here,
+                              since actions are continuous)
+  - Value function (critic) V(s): estimates expected future reward from state s
+
+PPO uses a "clipped surrogate objective" to limit how much the policy can
+change in a single update, preventing large destabilizing updates that cause
+training divergence. This makes it significantly more stable than vanilla
+policy gradient methods.
+
+NETWORK ARCHITECTURE
+---------------------
+Both policy and value networks are 2-layer MLPs:
+  State (63-dim) → Linear(256) → ReLU → Linear(128) → ReLU → output
+
+STUDENT WORK
+------------
+Students design a custom reward function in main.ipynb and train an improved
+agent. The .py file is provided infrastructure; do not modify it directly.
 
 IEOR E4010: AI for Operations Research and Financial Engineering
 Columbia University, Spring 2026
@@ -74,28 +109,49 @@ def train_rl_agent(
     total_timesteps: Optional[int] = None,
     save_path: str = "ppo_ev_charging",
     verbose: bool = True,
+    custom_reward_fn=None,
 ) -> Dict[str, Any]:
     """Train a PPO agent on the EV charging environment.
 
-    ★ STUDENT TODO: Experiment with training to improve performance.
-    
-    Ideas to try:
-    - Tune reward weights in config.py (most impactful!)
-    - Adjust PPO hyperparameters (lr, clip_range, n_steps, etc.)
-    - Change network architecture via policy_kwargs
-    - Train for more timesteps
-    - Use curriculum learning (start with fewer EVs)
-    - Implement custom reward shaping
-    - Try different normalization of observations
+    TRAINING PROCEDURE
+    ------------------
+    1. Create a vectorized training environment (DummyVecEnv wrapping
+       EVChargingEnv). Each episode randomizes EV schedules and picks a
+       random day's price curve — this provides diverse training scenarios
+       and prevents overfitting to a single charging pattern.
+
+    2. Create a fixed evaluation environment (same EV schedules and price
+       curve every evaluation call) for consistent performance tracking.
+
+    3. Train PPO with the provided hyperparameters. PPO collects n_steps
+       of experience, then performs n_epochs mini-batch gradient updates.
+
+    4. EvalCallback evaluates the policy every eval_freq steps on the fixed
+       evaluation scenario and saves the best checkpoint.
+
+    5. ChargingCallback logs episode costs and target achievement rates
+       for plotting training progress.
+
+    TRAINING TIME
+    -------------
+    200k timesteps ≈ ~2000 episodes × 96 steps. On CPU this takes roughly
+    5-10 minutes. On GPU it is marginally faster (the environment is the
+    bottleneck, not the neural network).
 
     Args:
-        cfg:              Configuration
-        total_timesteps:  Override training steps
-        save_path:        Where to save the trained model
-        verbose:          Print progress
+        cfg:              Configuration (hyperparameters in cfg.rl)
+        total_timesteps:  Override cfg.rl.total_timesteps
+        save_path:        Where to save the trained model (.zip extension added)
+        verbose:          Print training progress
+        custom_reward_fn: Optional custom reward function passed to the env.
+                          See EVChargingEnv for the expected signature.
 
     Returns:
-        Dict with trained model and training stats
+        Dict with:
+            model           — trained PPO model
+            save_path       — where model was saved
+            training_stats  — {episode_costs, episode_targets_met} lists
+            total_timesteps — number of timesteps trained
     """
     if not HAS_SB3:
         raise ImportError("stable-baselines3 is required for RL training")
@@ -111,9 +167,9 @@ def train_rl_agent(
               f"deadline={cfg.rl.reward_deadline_penalty}, "
               f"overload={cfg.rl.reward_overload_penalty}")
 
-    # Create training environment
+    # Create training environment (random scenarios each episode for diversity)
     def make_train_env():
-        env = make_env(cfg)
+        env = make_env(cfg, custom_reward_fn=custom_reward_fn)
         env = Monitor(env)
         return env
 

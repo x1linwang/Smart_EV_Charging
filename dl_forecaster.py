@@ -6,11 +6,44 @@ Uses LSTM (Long Short-Term Memory) networks to forecast electricity
 prices from raw sequential price data. Unlike the ML approach, the
 LSTM learns its own feature representations from the sequence.
 
-Key learning for students: On structured tabular data, the DL approach
-often shows marginal gains over well-tuned ML — the "right tool depends
-on the data, not the hype."
+WHAT THIS MODULE DOES
+---------------------
+Given a long time series of hourly electricity prices, it trains an LSTM
+neural network to predict the next hour's price from the *most recent
+seq_len hours* (default: 168 hours = 1 week). The model learns temporal
+dependencies automatically — no hand-crafted features required.
 
-Student TODOs are marked with ★.
+HOW THE LSTM WORKS HERE
+-----------------------
+The input to the LSTM is a sliding window of 168 normalized price values,
+shaped as (batch_size, 168, 1). The LSTM processes this sequence step-by-step,
+maintaining a hidden state that accumulates information about past prices.
+The final hidden state is passed through two fully connected layers to produce
+a single predicted price (the next hour).
+
+  Window: [p_{t-167}, p_{t-166}, ..., p_{t-1}, p_t]  →  prediction: p_{t+1}
+
+For multi-step forecasting (predict the next 24 hours), the model is run
+autoregressively: each prediction is fed back as the newest input.
+
+IMPORTANT NORMALIZATION NOTE
+-----------------------------
+Prices are z-score normalized using the *training set* mean and standard
+deviation. At inference time, the same statistics must be used to normalize
+inputs and denormalize outputs. These stats are saved in the lstm_dict.
+
+ML vs DL COMPARISON
+--------------------
+On structured price data with known seasonal patterns, XGBoost with good
+feature engineering often *matches or beats* LSTM. LSTM shines when:
+  - Patterns are too complex to manually engineer features for
+  - The sequence length matters (LSTM captures long-range dependencies)
+  - Multi-variate inputs are available (price + weather + grid signals)
+
+STUDENT WORK
+------------
+Students improve the LSTM in main.ipynb by subclassing PriceLSTM or
+modifying hyperparameters. The .py file itself is provided infrastructure.
 
 IEOR E4010: AI for Operations Research and Financial Engineering
 Columbia University, Spring 2026
@@ -68,21 +101,28 @@ class PriceSequenceDataset(Dataset):
 # LSTM Model
 # ============================================================
 class PriceLSTM(nn.Module):
-    """LSTM model for price forecasting.
+    """Baseline LSTM model for electricity price forecasting.
 
     Architecture:
-        Input (seq_len, 1) → LSTM layers → Last hidden state → FC → Output (1)
+        Input (batch, seq_len, 1) → LSTM (num_layers) → Last time step
+        → Linear(hidden → hidden//2) → ReLU → Dropout → Linear(hidden//2 → 1)
+        → Output scalar (next-hour price in normalized units)
 
-    ★ STUDENT TODO: Experiment with the architecture.
-    
-    Ideas to try:
-    - Change hidden_size (32, 64, 128, 256)
-    - Change num_layers (1, 2, 3)
-    - Add bidirectional=True
-    - Replace LSTM with GRU
-    - Add attention mechanism
-    - Add skip connections
-    - Use multiple input features (price + hour + dow)
+    Why this architecture?
+    ----------------------
+    - Two LSTM layers allow the network to learn both low-level patterns
+      (hour-to-hour changes) and high-level structures (daily/weekly cycles).
+    - Dropout between layers provides regularization to prevent overfitting
+      on the relatively small price dataset (~8,760 samples for 1 year).
+    - The two-layer FC head transforms the LSTM's rich hidden representation
+      down to a single scalar prediction.
+
+    Hyperparameter sensitivity:
+    - hidden_size: Larger = more capacity to model complex patterns, but
+      slower training and more data needed. 64 is a good default.
+    - num_layers: More layers = deeper temporal representation. 2 is
+      usually sufficient; 3+ rarely helps without more data.
+    - dropout: Higher = more regularization. Should match dataset size.
     """
 
     def __init__(
@@ -141,27 +181,45 @@ def train_lstm(
     val_prices: Optional[np.ndarray] = None,
     cfg: Config = DEFAULT_CONFIG,
     verbose: bool = True,
+    model_class=None,
 ) -> Dict[str, Any]:
-    """Train the LSTM model.
+    """Train an LSTM model for price forecasting.
 
-    ★ STUDENT TODO: Complete/improve the training loop.
-    
-    Ideas to try:
-    - Implement learning rate scheduling (ReduceLROnPlateau)
-    - Add gradient clipping
-    - Implement early stopping with patience
-    - Try different optimizers (AdamW, SGD with momentum)
-    - Add weight decay regularization
-    - Experiment with batch_size and sequence_length
+    TRAINING PROCEDURE
+    ------------------
+    1. Normalize prices using training set statistics (z-score).
+    2. Create sliding window datasets: each sample is
+       (prices[i:i+seq_len], prices[i+seq_len]).
+    3. Train with Adam optimizer + MSE loss.
+    4. Use ReduceLROnPlateau to halve LR when val loss plateaus.
+    5. Apply gradient clipping (max_norm=1.0) to prevent exploding gradients.
+    6. Apply early stopping (patience=10 epochs) on validation loss.
+    7. Keep the best model checkpoint (lowest val loss).
+
+    NORMALIZATION NOTE
+    ------------------
+    The returned lstm_dict stores norm_mean and norm_std. These MUST be used
+    when calling evaluate_lstm() or predict_next_24h_lstm() — the model
+    was trained on normalized data and outputs normalized predictions.
 
     Args:
-        train_prices: 1D array of training prices
-        val_prices:   1D array of validation prices (optional)
-        cfg:          Configuration
-        verbose:      Print training progress
+        train_prices: 1D array of training hourly prices (e.g., ~7000 samples)
+        val_prices:   1D array of validation prices (uses train normalization)
+        cfg:          Configuration (controls hidden_size, num_layers, etc.)
+        verbose:      Print training progress every 5 epochs
+        model_class:  Optional custom model class (must be a subclass of
+                      nn.Module with the same input/output signature as
+                      PriceLSTM). If None, uses the default PriceLSTM.
+                      Students pass their custom architecture here.
 
     Returns:
-        Dict with model, training history, normalization stats
+        Dict with keys:
+            model      — trained PyTorch model (on CPU/GPU, eval mode)
+            device     — torch.device used for training
+            history    — {train_loss, val_loss, val_mae} lists
+            norm_mean  — float, training price mean
+            norm_std   — float, training price std
+            seq_len    — int, input sequence length
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if verbose:
@@ -188,8 +246,9 @@ def train_lstm(
         val_dataset.prices_norm = (val_dataset.prices - train_dataset.mean) / train_dataset.std
         val_loader = DataLoader(val_dataset, batch_size=cfg.forecast.lstm_batch_size, shuffle=False)
 
-    # Create model
-    model = PriceLSTM(
+    # Create model — use custom class if provided, otherwise default PriceLSTM
+    ModelClass = model_class if model_class is not None else PriceLSTM
+    model = ModelClass(
         input_size=1,
         hidden_size=cfg.forecast.lstm_hidden_size,
         num_layers=cfg.forecast.lstm_num_layers,
@@ -388,6 +447,92 @@ def predict_next_24h_lstm(
             buffer.append(y_pred)
 
     return np.maximum(0, np.array(predictions))
+
+
+# ============================================================
+# Model Persistence (Save / Load)
+# ============================================================
+def save_lstm_model(lstm_dict: Dict[str, Any], path: str = "submission/lstm_model.pth") -> None:
+    """Save a trained LSTM model to disk.
+
+    Saves the model's state_dict (weights) along with normalization statistics
+    and architecture hyperparameters needed to reconstruct the model at
+    inference time. Uses torch.save() which stores a Python dict.
+
+    IMPORTANT: This saves weights only, not the model class definition.
+    To load the model, you must use the same model class (PriceLSTM or your
+    custom subclass).
+
+    Args:
+        lstm_dict: Output from train_lstm()
+        path:      Save path (e.g., "submission/lstm_model.pth")
+    """
+    import os
+
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+
+    model = lstm_dict["model"]
+    save_data = {
+        "model_state_dict": model.state_dict(),
+        "norm_mean": lstm_dict["norm_mean"],
+        "norm_std": lstm_dict["norm_std"],
+        "seq_len": lstm_dict["seq_len"],
+        "hidden_size": model.hidden_size,
+        "num_layers": model.num_layers,
+        "history": lstm_dict.get("history", {}),
+    }
+    torch.save(save_data, path)
+    size_mb = os.path.getsize(path) / 1024 / 1024
+    print(f"LSTM model saved to '{path}' ({size_mb:.2f} MB)")
+    print(f"  Architecture: hidden={model.hidden_size}, layers={model.num_layers}")
+    print(f"  Sequence length: {lstm_dict['seq_len']} hours")
+    print(f"  Normalization: mean={lstm_dict['norm_mean']:.2f}, std={lstm_dict['norm_std']:.2f}")
+
+
+def load_lstm_model(
+    path: str = "submission/lstm_model.pth",
+    model_class=None,
+    device: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Load a saved LSTM model from disk.
+
+    Args:
+        path:        Path to the .pth file saved by save_lstm_model()
+        model_class: Model class to use for reconstruction (defaults to
+                     PriceLSTM). Must match the class used when saving.
+        device:      Device string ('cpu', 'cuda') or None for auto-detect.
+
+    Returns:
+        lstm_dict compatible with evaluate_lstm() and predict_next_24h_lstm()
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(device)
+
+    save_data = torch.load(path, map_location=device)
+
+    ModelClass = model_class if model_class is not None else PriceLSTM
+    model = ModelClass(
+        input_size=1,
+        hidden_size=save_data["hidden_size"],
+        num_layers=save_data["num_layers"],
+        dropout=0.0,  # Dropout disabled at inference
+    ).to(device)
+    model.load_state_dict(save_data["model_state_dict"])
+    model.eval()
+
+    print(f"LSTM model loaded from '{path}'")
+    print(f"  Architecture: hidden={save_data['hidden_size']}, layers={save_data['num_layers']}")
+
+    return {
+        "model": model,
+        "device": device,
+        "history": save_data.get("history", {}),
+        "norm_mean": save_data["norm_mean"],
+        "norm_std": save_data["norm_std"],
+        "seq_len": save_data["seq_len"],
+    }
 
 
 # ============================================================

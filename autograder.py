@@ -76,6 +76,39 @@ A combined score is computed as:
 The combined score is used for ranking. Grading policy is left to the
 instructor's discretion.
 
+STEP-BY-STEP GUIDE FOR CAs
+--------------------------
+1. Collect all student submission folders into one directory (e.g., ./submissions/).
+   Each student's folder should be named by their UNI (e.g., submissions/js1234/).
+
+2. Run the autograder:
+     python autograder.py --submissions_dir ./submissions --verbose
+
+3. The autograder will:
+   a. Generate holdout data using the secret seed (students never see this data).
+   b. Train baseline models on holdout data (~5-10 min for ML+LSTM+RL).
+   c. Evaluate each student's models against the holdout data.
+   d. Output a leaderboard CSV and print results to the console.
+
+4. The leaderboard CSV contains one row per student plus a baseline row.
+   Share the leaderboard with students (minus the baseline seed info).
+
+5. For extra credit: students with combined_score > 1.0 beat all baselines.
+   The instructor decides how much extra credit to award per score increment.
+
+COMMON CA ISSUES
+----------------
+- "Student model fails to load": Usually means they modified the architecture
+  but didn't save/load correctly. They get NaN for that component.
+- "Baseline LSTM training takes too long": The autograder trains a quick
+  baseline (20 epochs). Total autograder runtime is ~10-20 minutes for
+  a class of 30 students.
+- "Student's ML MAE is NaN": They probably didn't save the model or
+  their custom feature engineering created columns that don't exist in
+  the holdout feature set. The autograder handles this gracefully.
+- "RL evaluation episodes vary a lot": This is normal. 20 episodes
+  provides a reasonable estimate. Increase --rl_episodes for more precision.
+
 IEOR E4010: AI for Operations Research and Financial Engineering
 Columbia University, Spring 2026
 """
@@ -98,11 +131,13 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 # ============================================================
-# Configuration
+# Configuration — CA/Instructor Settings
 # ============================================================
-# Holdout seed is known only to course staff.
-# Change between semesters to prevent students from overfitting
-# to the holdout distribution.
+# IMPORTANT FOR CAs: Change the holdout seed each semester.
+# If students discover the seed, they can overfit their models
+# to the holdout distribution, defeating the purpose of evaluation.
+# The seed controls both the holdout price data and the RL
+# evaluation scenario (EV schedules + price curve).
 DEFAULT_HOLDOUT_SEED = 7777
 
 # Number of holdout price days to generate
@@ -111,7 +146,9 @@ DEFAULT_HOLDOUT_DAYS = 30
 # Number of RL evaluation episodes (more = more reliable estimate)
 DEFAULT_RL_EPISODES = 20
 
-# Day index from holdout prices to use for RL evaluation
+# Day index from holdout prices to use for RL evaluation.
+# This selects which day's price curve is used for the RL scenario.
+# Day 5 is chosen to avoid edge effects at the start of the series.
 RL_EVAL_DAY_INDEX = 5
 
 
@@ -225,9 +262,18 @@ def evaluate_ml_submission(
 ) -> Dict[str, float]:
     """Evaluate a student's saved ML model on holdout test data.
 
-    The student's model may have been trained with custom features.
-    We use the feature_columns stored in the pickle to extract the
-    right columns from the holdout test data.
+    HOW THIS WORKS:
+    The student's saved .pkl file contains the trained model objects AND
+    a list of feature column names they used during training. We call
+    the baseline engineer_features() on the holdout data to generate
+    the standard feature columns. If the student added custom features
+    that don't exist in the holdout data, those columns are skipped
+    (with a warning). The model is evaluated only on available features.
+
+    This means students who add custom features in a SEPARATE function
+    will still be evaluated fairly — the model uses whatever baseline
+    features are available. Students who modified engineer_features()
+    directly (which they shouldn't) may see degraded performance.
 
     Returns:
         Dict with mae, rmse, r2 (NaN on error)
@@ -324,10 +370,17 @@ def evaluate_rl_submission(
 ) -> Dict[str, float]:
     """Evaluate a student's saved RL agent on the holdout charging scenario.
 
-    Loads the PPO model and runs n_episodes deterministic rollouts on
-    the fixed holdout scenario. Uses the DEFAULT reward function from
-    environment.py regardless of what reward function the student used
-    during training — this ensures a fair cost comparison.
+    HOW THIS WORKS:
+    Loads the student's PPO model (.zip file saved by Stable-Baselines3)
+    and runs n_episodes deterministic rollouts on the fixed holdout
+    scenario (same EV schedules and price curve for every student).
+
+    IMPORTANT: The environment uses the DEFAULT reward function from
+    environment.py, regardless of what custom reward the student used
+    during training. This ensures all students are compared on the
+    same cost metric. A student's custom reward might emphasize
+    different tradeoffs (e.g., penalize violations more heavily),
+    but the final evaluation metric is always net electricity cost.
 
     Returns:
         Dict with net_cost_mean, net_cost_std, targets_met_mean (NaN on error)
@@ -377,12 +430,25 @@ def compute_combined_score(
 ) -> float:
     """Compute the normalized combined score for extra credit ranking.
 
-    Score > 1.0: student beats all baselines (earns extra credit)
-    Score ≈ 1.0: on par with provided baselines
-    Score < 1.0: below baseline performance
+    HOW SCORING WORKS:
+    Each component score is the ratio baseline_metric / student_metric.
+    A ratio > 1.0 means the student's model outperformed the baseline.
 
-    Weights: ML=30%, LSTM=30%, RL=40%
-    (RL weighted highest as it is the most open-ended task)
+    Example: If baseline ML MAE = $3.50 and student ML MAE = $2.80,
+    then ml_score = 3.50 / 2.80 = 1.25 (25% better than baseline).
+
+    The three component scores are combined with weights:
+      ML=30%, LSTM=30%, RL=40%
+    RL is weighted highest because the reward function design task
+    is the most open-ended and has the largest impact on performance.
+
+    Score interpretation:
+      > 1.0: student beats all baselines on weighted average (extra credit)
+      ≈ 1.0: on par with provided baselines
+      < 1.0: below baseline on average (no extra credit, but may still pass)
+
+    If a student didn't submit one model type, the weights are
+    renormalized among the submitted components.
     """
     scores = []
     weights = []

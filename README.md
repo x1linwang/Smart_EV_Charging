@@ -1,4 +1,4 @@
-# 🔌 Large-Scale EV Smart Charging: A Four-Pillar AI Project
+# Large-Scale EV Smart Charging: A Four-Pillar AI Project
 
 **IEOR E4010 — Artificial Intelligence for Operations Research and Financial Engineering**
 Columbia University · Spring 2026 · Final Project
@@ -7,27 +7,35 @@ Columbia University · Spring 2026 · Final Project
 
 ## Overview
 
-You are the fleet operations manager at a delivery company depot.
-Every evening, 20 electric vans return and must be charged to ≥90% by their morning departure — but a shared 150 kW transformer means you can't charge them all at once.
+You are the fleet operations manager at a delivery company depot. Every evening, **20 electric delivery vans** return from their routes with partially depleted batteries. They must all be charged to **at least 90% State of Charge (SoC)** by their individual morning departure times. However, the depot's shared **150 kW electrical transformer** cannot supply all 20 EVs at full power simultaneously (20 EVs × 11 kW = 220 kW theoretical demand vs. 150 kW capacity).
 
-Your job: **minimize electricity cost** while meeting every vehicle's deadline.
+**Your objective:** Minimize total electricity cost while meeting every vehicle's departure deadline and respecting the transformer capacity constraint.
 
 This project integrates four AI pillars into one working system:
 
-| Pillar | Module | What It Does |
-|--------|--------|-------------|
-| **Machine Learning** | `ml_forecaster.py` | XGBoost forecasts next-hour electricity prices from tabular features |
-| **Deep Learning** | `dl_forecaster.py` | LSTM learns price patterns from raw sequential data |
-| **Reinforcement Learning** | `rl_agent.py` | PPO agent learns a real-time charging policy through simulation |
-| **Agentic AI** | `agentic_ai.py` | GPT-4o orchestrator with tool-calling ties everything together |
+| Pillar | Module | What It Does | Key Idea |
+|--------|--------|-------------|----------|
+| **Machine Learning** | `ml_forecaster.py` | XGBoost forecasts next-hour electricity prices from engineered tabular features | Hand-crafted features + gradient boosting |
+| **Deep Learning** | `dl_forecaster.py` | LSTM learns price patterns from raw sequential data | Automatic representation learning from sequences |
+| **Reinforcement Learning** | `rl_agent.py` | PPO agent learns a real-time charging policy through simulation | Trial-and-error with no future knowledge |
+| **Agentic AI** | `agentic_ai.py` | GPT-4o orchestrator with tool-calling ties everything together | LLM as decision coordinator |
 
 ---
 
-## Quick Start
+## Quick Start (Google Colab — Recommended)
 
-### 1. Environment Setup
+1. Open `main.ipynb` in Google Colab
+2. Run the first setup cell to clone the repo and install dependencies
+3. Run cells top-to-bottom — everything works out of the box
+4. Complete the TODO sections, save your models, and submit
+
+### Local Setup (Alternative)
 
 ```bash
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/Smart_EV_Charging.git
+cd Smart_EV_Charging
+
 # Create a virtual environment (recommended)
 python -m venv ev_env
 source ev_env/bin/activate        # Linux/Mac
@@ -35,150 +43,318 @@ source ev_env/bin/activate        # Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
-```
 
-### 2. Run the Full Pipeline
-
-**Option A — Jupyter Notebook (recommended):**
-```bash
+# Open the notebook
 jupyter notebook main.ipynb
-```
-Run cells top-to-bottom. The notebook guides you through every step.
-
-**Option B — Individual Modules:**
-```bash
-# Test data generation
-python data_utils.py
-
-# Run heuristic baselines
-python heuristics.py
-
-# Solve LP optimal
-python optimizer.py
-
-# Train ML forecaster
-python ml_forecaster.py
-
-# Train LSTM forecaster
-python dl_forecaster.py
-
-# Train RL agent (takes ~5-10 min)
-python rl_agent.py
-
-# Run agentic AI demo (works in mock mode without API key)
-python agentic_ai.py
-```
-
-### 3. Enable Live LLM Mode (Optional)
-
-The agentic AI module defaults to **mock mode** (no API key needed).
-To enable live GPT-4o responses:
-
-```bash
-export OPENAI_API_KEY="sk-..."
-python agentic_ai.py
-```
-
-Or in Python / Jupyter:
-```python
-import os
-os.environ["OPENAI_API_KEY"] = "sk-..."
-```
-
-### 4. Use Realistic Price Data (Optional)
-
-By default, the project uses synthetic prices calibrated to CAISO patterns.
-To use real wholesale market data:
-
-```bash
-pip install gridstatus
-```
-
-Then in your code or notebook:
-```python
-from data_utils import load_realistic_prices
-prices_df = load_realistic_prices("CAISO", "2024-01-01", "2024-12-31")
-```
-
-Supported ISOs: CAISO, ERCOT, PJM, MISO, NYISO, ISONE, SPP.
-
----
-
-## Project Structure
-
-```
-ev_smart_charging/
-├── config.py            # All parameters in one place (dataclasses)
-├── data_utils.py        # Synthetic + realistic data generation
-├── environment.py       # Gymnasium environment for the charging problem
-├── heuristics.py        # ASAP, ALAP, Round Robin baselines
-├── optimizer.py         # LP optimal solution (perfect foresight)
-├── ml_forecaster.py     # Pillar 1: XGBoost / Random Forest
-├── dl_forecaster.py     # Pillar 2: LSTM
-├── rl_agent.py          # Pillar 3: PPO via Stable-Baselines3
-├── agentic_ai.py        # Pillar 4: OpenAI tool-calling orchestrator
-├── main.ipynb           # Master notebook (run this)
-├── requirements.txt     # Python dependencies
-└── README.md            # This file
 ```
 
 ---
 
 ## Problem Specification
 
-| Parameter | Value | Why |
-|-----------|-------|-----|
+### Physical Setup
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
 | Fleet size | 20 EVs | Large enough for coupling constraints to matter |
-| Battery capacity | 60 kWh | Typical commercial van (e.g., Ford E-Transit) |
-| Charge/discharge rate | ±11 kW | Level 2 AC, bidirectional for V2G |
-| Transformer limit | 150 kW | 20×11=220 kW demand vs. 150 kW supply → must coordinate |
-| Target departure SoC | ≥90% | Hard constraint — missed deadlines are penalized |
-| Arrival SoC | 20–60% (μ=35%) | Stochastic — varies by vehicle each day |
+| Battery capacity | 60 kWh | Typical commercial van (Ford E-Transit class) |
+| Max charge/discharge rate | ±11 kW | Level 2 AC, bidirectional for V2G |
+| Transformer limit | 150 kW | 20×11=220 kW demand vs. 150 kW supply → coordination required |
+| Target departure SoC | ≥90% | Hard constraint — penalties for missed deadlines |
+| Arrival SoC | 20–60% (mean=35%) | Stochastic — varies by vehicle each day |
 | Arrivals | 2 PM – 8 PM | Afternoon return from delivery routes |
 | Departures | 5 AM – 9 AM | Morning dispatch for next day's deliveries |
-| Time resolution | 15 minutes | 96 steps per 24-hour day |
-| V2G degradation | $0.04/kWh | Battery wear cost for discharging |
+| Time resolution | 15 minutes | 96 steps per 24-hour simulation day |
+| V2G degradation | $0.04/kWh | Battery wear cost for discharging (Vehicle-to-Grid) |
+
+### Why This Problem Is Challenging
+
+The **coupling constraint** (shared transformer) is what makes this problem non-trivial. Without it, each EV's charging problem is independent and trivially solved. With it, charging one EV affects how much power is available for all others. This creates a coordination problem that requires intelligent scheduling.
+
+Additionally, **electricity prices vary dramatically over 24 hours** — from ~$15/MWh overnight to ~$75/MWh during the evening peak. A smart controller can exploit this price variation by:
+- Concentrating charging during cheap overnight hours
+- Using V2G to **sell energy back** during expensive peak hours (buying low, selling high — arbitrage)
 
 ---
 
-## Student Tasks (★ TODOs)
+## Data Description
 
-The code is **complete and runnable** as provided. These TODOs mark where students can improve upon the working baselines:
+### Electricity Price Data
 
-### TODO 1: ML Feature Engineering (`ml_forecaster.py`)
-**Function:** `engineer_features()`
+Generated by `generate_synthetic_prices()` in `data_utils.py`. The prices model California ISO (CAISO) day-ahead market patterns:
 
-Improve the feature pipeline for XGBoost price forecasting. Ideas:
-- Additional lag features (t-48, t-72)
-- Interaction features (hour × is_weekend)
-- Fourier encoding of cyclical time
-- Exponentially weighted moving averages
+- **Overnight valley** (midnight–6 AM): Low demand → ~$15-25/MWh
+- **Solar duck curve dip** (10 AM–3 PM): Solar surplus pushes prices down → ~$10-20/MWh
+- **Evening peak** (5–9 PM): Solar drops off, demand stays high → ~$50-100/MWh
 
-### TODO 2: LSTM Architecture & Training (`dl_forecaster.py`)
-**Class:** `PriceLSTM` and **Function:** `train_lstm()`
+Additional variation sources:
+- Seasonal adjustment (summer prices higher due to cooling load)
+- Weekday/weekend effects (lower weekend demand)
+- Random noise and occasional price spikes (1% probability)
+- Rare negative prices from renewable surplus (0.5% probability at midday)
 
-Improve the deep learning forecaster. Ideas:
-- Experiment with hidden_size (32, 64, 128, 256)
-- Try GRU instead of LSTM
-- Add attention mechanism
-- Use multi-feature input (price + hour + dow)
+**Output format:** A Pandas DataFrame with columns `datetime`, `price_mwh`, `hour`, `day_of_week`, `month`, `is_weekend`, `day_index`. By default, 365 days × 24 hours = 8,760 rows.
 
-### TODO 3: RL Reward Function Design (`environment.py`)
-**Location:** `step()` method, Section 8
+### EV Fleet Schedules
 
-Design a better reward function for the PPO agent. Ideas:
-- Change penalty magnitudes
-- Add reward for smooth power profiles
-- Reward V2G revenue explicitly
-- Lexicographic priorities instead of weighted sum
+Generated by `generate_ev_schedules()` in `data_utils.py`. Each EV gets:
+- **Arrival time**: Uniform in [2 PM, 8 PM], converted to a time step index (0-95)
+- **Departure time**: Uniform in [5 AM, 9 AM] the next morning
+- **Arrival SoC**: Truncated normal (mean=35%, std=10%, clipped to [20%, 60%])
+- **Feasibility guarantee**: If an EV cannot physically reach 90% SoC in its available window, arrival SoC is adjusted upward
 
-### TODO 4: Analysis Report (`main.ipynb`)
-**Location:** Section 9 of the notebook
+---
 
-Answer the analysis questions comparing all approaches:
-- ML vs. DL forecasting performance
-- RL vs. LP: the "cost of uncertainty"
-- Overall strategy ranking and deployment recommendation
+## Project Architecture
+
+### File Structure
+
+```
+Smart_EV_Charging/
+├── config.py            # All parameters in one place (dataclasses)
+├── data_utils.py        # Synthetic + realistic data generation
+├── environment.py       # Gymnasium RL environment
+├── heuristics.py        # ASAP, ALAP, Round Robin baselines
+├── optimizer.py         # LP optimal solution (perfect foresight)
+├── ml_forecaster.py     # Pillar 1: XGBoost / Random Forest
+├── dl_forecaster.py     # Pillar 2: LSTM
+├── rl_agent.py          # Pillar 3: PPO via Stable-Baselines3
+├── agentic_ai.py        # Pillar 4: OpenAI tool-calling orchestrator
+├── autograder.py        # CA autograder for student submissions
+├── main.ipynb           # Student notebook (all work happens here)
+├── requirements.txt     # Python dependencies
+└── README.md            # This file
+```
+
+**Important:** The `.py` files are **provided infrastructure**. Students should NOT modify them. All student work is done in `main.ipynb`.
+
+### What Each Module Does
+
+**`config.py`** — Centralized configuration using Python dataclasses. All physical parameters (battery capacity, fleet size, transformer limit), simulation parameters (time resolution, price model), and AI hyperparameters (learning rates, network sizes) are defined here. Students can override values in the notebook: `cfg.rl.total_timesteps = 200_000`.
+
+**`data_utils.py`** — Data generation and management. `generate_synthetic_prices()` creates CAISO-calibrated price time series. `generate_ev_schedules()` creates stochastic EV arrival/departure schedules. `get_daily_price_curve()` extracts one day at 15-minute resolution for simulation. `train_test_split_prices()` performs chronological train/test split.
+
+**`environment.py`** — A Gymnasium-compatible RL environment. Each episode simulates one 24-hour day at the depot. State space: 63-dim vector (per-EV SoC, time-to-departure, connected flag; plus global time, price, load). Action space: 20-dim continuous [-1, +1] (charge/idle/discharge per EV). Transformer constraint enforced by proportional scaling.
+
+**`heuristics.py`** — Three rule-based baseline strategies: ASAP (charge immediately), ALAP (delay until last moment), Round Robin (prioritize by urgency). These establish a performance floor.
+
+**`optimizer.py`** — Linear programming solution using scipy's HiGHS solver. Requires **perfect foresight** (knows all future prices). Minimizes total cost subject to power bounds, SoC dynamics, departure targets, and transformer limit. Serves as the theoretical optimal benchmark.
+
+**`ml_forecaster.py`** — XGBoost and Random Forest models for next-hour price prediction. Features include lag prices (t-1 through t-168), rolling statistics, cyclical time encodings, and peak-period indicators. Includes `save_ml_model()` / `load_ml_model()` for submission.
+
+**`dl_forecaster.py`** — LSTM neural network for next-hour price prediction from raw sequences. Takes a sliding window of 168 hours (1 week) of prices as input. Includes z-score normalization, early stopping, and gradient clipping. Includes `save_lstm_model()` / `load_lstm_model()` for submission.
+
+**`rl_agent.py`** — PPO agent training using Stable-Baselines3. Uses MLP policy [256→128] for both actor and critic. Trains on randomized scenarios for diversity. Includes `evaluate_rl_agent()` for performance assessment.
+
+**`agentic_ai.py`** — LLM orchestrator with tool-calling. Works in mock mode (no API key needed) or live mode (requires OpenAI API key). The LLM decides which tools to call based on natural language queries.
+
+**`autograder.py`** — CA-only script for evaluating student submissions. See "Autograder" section below.
+
+---
+
+## Why the LP Benchmark?
+
+A natural question: *"If the LP knows all future prices and the RL agent doesn't, isn't the comparison unfair?"* — **That's exactly the point.**
+
+The LP optimal solution represents the **theoretical minimum cost achievable by any controller**. Since it uses complete future information (perfect foresight), no online/real-time method can beat it. The LP serves three purposes:
+
+1. **Performance ceiling:** It tells us the absolute best we could do. If the LP costs $5.00 and your RL agent costs $7.50, then $2.50 is the "cost of uncertainty."
+
+2. **Value of information:** The gap between LP and RL quantifies how much a fleet operator should pay for a perfect price forecast. If the gap is $2.50/day for 20 EVs, that's ~$900/year — the maximum economic value of a perfect forecasting system.
+
+3. **Validation:** If your RL agent costs *more* than ASAP (the worst reasonable strategy), something is wrong with your reward function or training. The LP and heuristics bracket the range of reasonable costs.
+
+---
+
+## ML Forecasting Details
+
+### What Does the ML Model Predict?
+
+The ML model predicts the **next hour's electricity price** (one-step-ahead forecasting):
+
+```
+Input features (at time t):
+  - price[t-1], price[t-2], ..., price[t-168]  (lag prices)
+  - rolling_mean_6h, rolling_mean_24h, rolling_mean_168h  (trend)
+  - rolling_std_6h, rolling_std_24h  (volatility)
+  - sin(2π·hour/24), cos(2π·hour/24)  (cyclical time)
+  - is_peak, is_solar, is_overnight  (period flags)
+  - price_diff_1, price_diff_24  (momentum)
+
+Target: price[t+1]  (next hour's price)
+```
+
+All features use only past and current data — no future information leaks into the features.
+
+### Why XGBoost?
+
+Electricity prices have strong, regular patterns that map naturally to hand-crafted features. On this type of structured tabular data, gradient boosting (XGBoost) often matches or outperforms deep learning because:
+- Tree models handle feature interactions natively
+- They're fast to train and don't require GPU
+- Feature importance is directly interpretable
+
+---
+
+## LSTM Forecasting Details
+
+### How Does the LSTM Differ from XGBoost?
+
+The LSTM takes a fundamentally different approach: instead of hand-crafted features, it learns representations directly from **raw price sequences**.
+
+**Input:** A sliding window of 168 consecutive hourly prices (1 week), shaped as `(batch, 168, 1)`.
+
+**Process:** The LSTM processes the sequence step-by-step, maintaining a hidden state that accumulates temporal information. After all 168 steps, the final hidden state is passed through a fully connected head to predict the next price.
+
+**Key difference:** XGBoost needs you to tell it "look at the price 24 hours ago"; the LSTM can potentially discover this pattern on its own from the raw sequence.
+
+**When LSTM wins:** Complex temporal patterns, multi-variate inputs (price + weather + load), longer-range dependencies.
+
+**When XGBoost wins:** Structured data with clear features, limited training data, interpretability requirements.
+
+---
+
+## RL Agent Details
+
+### State Space (63 dimensions)
+
+For each of the 20 EVs (60 values total):
+- `current_soc` [0, 1]: Current battery level
+- `time_to_departure` [0, 1]: 1.0 when just arrived, decreasing toward 0 at departure
+- `is_connected` {0, 1}: Whether the EV is currently plugged in
+
+Global state (3 values):
+- `normalized_time` [0, 1]: Fraction of the day elapsed
+- `normalized_price` [0, 1]: Current price / max observed price
+- `load_fraction` [0, 1]: Previous step's total power / transformer limit
+
+**Critical:** The agent sees the current price but NOT future prices. It must learn to anticipate price patterns from the time-of-day signal.
+
+### Action Space (20 dimensions, continuous)
+
+One action per EV in [-1, +1]:
+- `+1.0` → charge at maximum rate (11 kW)
+- `0.0` → idle
+- `-1.0` → discharge at maximum rate (11 kW, V2G)
+
+### Reward Function (Baseline)
+
+```
+reward = -(price_weight × step_cost) - deadline_penalty - overload_penalty
+```
+
+Where:
+- `step_cost = charging_cost - v2g_revenue + degradation_cost`
+- `deadline_penalty = 100 × shortfall` (fires when an EV departs below 90% SoC)
+- `overload_penalty = 50 × overload_fraction` (fires when transformer limit exceeded)
+
+### Constraint Enforcement
+
+The transformer constraint is enforced via **proportional scaling**: if total requested charging power exceeds 150 kW, all charging actions are scaled down proportionally to exactly hit the limit. This is a soft projection that allows the agent to learn without hard action clipping.
+
+---
+
+## Student Tasks (TODO)
+
+The code is **complete and runnable** as provided. TODOs mark where students improve upon working baselines:
+
+### TODO 1: ML Feature Engineering (Section 4)
+Write a custom `engineer_features_custom()` function with additional features. Suggestions: longer lags (t-48, t-72), interaction features, Fourier encoding, EWMAs. Evaluate impact on MAE.
+
+### TODO 2: LSTM Architecture (Section 5)
+Modify the LSTM architecture or hyperparameters. Suggestions: vary hidden_size, try GRU, add attention, use multi-feature input. Compare against baseline LSTM and XGBoost.
+
+### TODO 3: RL Reward Function (Section 6)
+Design a custom reward function passed via `custom_reward_fn`. Suggestions: adjust penalty magnitudes, add smoothness reward, reward V2G explicitly, time-aware reward shaping.
+
+### TODO 4: Analysis Report (Section 9)
+Answer analysis questions with specific numbers and charts. Compare ML vs. DL, compute cost of uncertainty, rank all strategies, provide deployment recommendation.
+
+---
+
+## Submission Instructions
+
+### What to Submit
+
+```
+submission/
+├── ml_model.pkl          # From save_ml_model() in Section 4
+├── lstm_model.pth        # From save_lstm_model() in Section 5
+├── rl_agent.zip          # From PPO.save() in Section 6
+├── student_info.json     # Generated in Section 10 of notebook
+└── main.ipynb            # Your completed notebook with analysis
+```
+
+### Model Saving Commands (in the notebook)
+
+```python
+# ML model
+from ml_forecaster import save_ml_model
+save_ml_model(ml_models, path="submission/ml_model.pkl")
+
+# LSTM model
+from dl_forecaster import save_lstm_model
+save_lstm_model(lstm_dict, path="submission/lstm_model.pth")
+
+# RL agent
+rl_result["model"].save("submission/rl_agent")
+```
+
+---
+
+## Autograder (For CAs/Instructors Only)
+
+The autograder (`autograder.py`) evaluates student submissions on a **hidden holdout dataset** and produces a ranked leaderboard. Students do not run this script.
+
+### How to Run
+
+```bash
+python autograder.py --submissions_dir ./submissions --verbose
+```
+
+### What It Does
+
+1. **Generates holdout data** using a secret seed (`DEFAULT_HOLDOUT_SEED = 7777`). Change this each semester.
+2. **Computes baselines** by training the provided ML, LSTM, and RL models on holdout data.
+3. **Evaluates each student** by loading their saved models and testing on holdout data:
+   - ML: MAE, RMSE, R² on holdout price prediction
+   - LSTM: MAE, RMSE, R² on holdout price prediction
+   - RL: Mean net cost and target compliance over 20 episodes on holdout scenario
+4. **Computes combined score**: `0.3 × (baseline_ml_mae/student_ml_mae) + 0.3 × (baseline_lstm_mae/student_lstm_mae) + 0.4 × (baseline_rl_cost/student_rl_cost)`
+5. **Produces leaderboard** sorted by combined score. Score > 1.0 = beats baseline.
+
+### CLI Options
+
+```
+--submissions_dir DIR    Directory with student subfolders (required)
+--holdout_seed INT       Secret seed for holdout data (default: 7777)
+--holdout_days INT       Days of holdout data to generate (default: 30)
+--rl_episodes INT        Episodes per RL evaluation (default: 20)
+--output FILE            Output CSV path (default: leaderboard.csv)
+--verbose                Print detailed per-student results
+```
+
+### Expected Directory Structure
+
+```
+submissions/
+├── student_js1234/
+│   ├── ml_model.pkl
+│   ├── lstm_model.pth
+│   ├── rl_agent.zip
+│   └── student_info.json
+├── student_ab5678/
+│   ├── ml_model.pkl
+│   └── ...
+└── ...
+```
+
+### Notes for CAs
+
+- **Change the holdout seed each semester** to prevent students from overfitting to a known seed.
+- The autograder takes ~10-20 minutes to run (mostly RL baseline training and evaluation).
+- Students who didn't submit a particular model receive NaN for that metric.
+- The baseline row (score = 1.0) is included in the output CSV for reference.
+- If a student's model fails to load (architecture mismatch, corrupted file), the error is logged and they receive NaN for that metric.
 
 ---
 
@@ -195,6 +371,7 @@ Answer the analysis questions comparing all approaches:
 | torch | ≥2.0 | LSTM training |
 | gymnasium | ≥0.29 | RL environment |
 | stable-baselines3 | ≥2.2 | PPO implementation |
+| joblib | ≥1.3 | Model serialization |
 | openai | ≥1.0 | LLM API (optional) |
 | gridstatus | ≥0.25 | Real price data (optional) |
 
@@ -215,4 +392,7 @@ Answer the analysis questions comparing all approaches:
 → Reduce `cfg.forecast.lstm_sequence_length` to 48 (2 days). Check that prices are not all identical.
 
 **`openai.AuthenticationError`**
-→ Set `OPENAI_API_KEY` env variable, or use mock mode (default).
+→ Set `OPENAI_API_KEY` env variable, or use mock mode (default — works without any API key).
+
+**Model save/load errors in Colab**
+→ Make sure you run the save cells *after* training completes. Check that the `submission/` directory exists.

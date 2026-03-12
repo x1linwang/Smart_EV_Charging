@@ -167,6 +167,22 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# Student submission files (model weights — large binary files)
+submission/
+submissions/
+*.pkl
+*.pth
+*.zip
+leaderboard.csv
+
+# RL training artifacts
+ppo_ev_charging*
+*_best/
+*_logs/
+
+# Generated plots
+*.png
+
 # Ruff stuff:
 .ruff_cache/
 

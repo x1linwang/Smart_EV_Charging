@@ -13,6 +13,9 @@ scikit-learn>=1.3.0
 # Visualization
 matplotlib>=3.7.0
 
+# Model Serialization
+joblib>=1.3.0
+
 # Machine Learning (Pillar 1)
 xgboost>=2.0.0
 

@@ -9,6 +9,56 @@ This script evaluates all student-submitted model files against a hidden
 holdout dataset and produces a ranked leaderboard. It is intended for
 course staff (CAs/instructors) only; students do not run this file.
 
+QUICK START FOR CAs
+-------------------
+1. Collect student submission zips from Courseworks.
+   Unzip each into a subfolder named after the student's UNI:
+
+     submissions/
+     ├── js1234/
+     │   ├── ml_model.pkl
+     │   ├── lstm_model.pth
+     │   ├── rl_agent.zip
+     │   └── student_info.json
+     └── ab5678/
+         └── ...
+
+   NOTE: The submission packaging cell (Section 10) in main.ipynb creates
+   this structure automatically. Students submit a zip that extracts to
+   a folder named submission_UNI/ — rename that folder to the UNI for clarity.
+
+2. Run the autograder (evaluates all three pillars, ~60-90 min for 30 students):
+
+     python autograder.py --submissions_dir ./submissions --verbose
+
+3. Results are saved to leaderboard.csv:
+   - combined_score > 1.0 → student beats all baselines (extra credit)
+   - combined_score ≈ 1.0 → on par with provided baselines
+   - combined_score < 1.0 → below baseline performance
+
+4. To evaluate only one pillar (useful for staged deadlines):
+
+     python autograder.py --submissions_dir ./submissions --pillar ml
+     python autograder.py --submissions_dir ./submissions --pillar lstm
+     python autograder.py --submissions_dir ./submissions --pillar rl
+
+5. To check submission structure without running models (fast dry run):
+
+     python autograder.py --submissions_dir ./submissions --dry_run
+
+6. Change the holdout seed each semester to prevent students from hardcoding
+   to the holdout distribution:
+
+     python autograder.py --submissions_dir ./submissions --holdout_seed 9999
+
+TIMING ESTIMATES (on a standard laptop CPU)
+--------------------------------------------
+  Baseline computation: ~5-10 min (ML + LSTM + RL training)
+  Per-student ML eval:  ~30 sec
+  Per-student LSTM eval: ~30 sec
+  Per-student RL eval:  ~2 min (20 episodes × 96 steps)
+  Total for 30 students: ~75-90 min
+
 USAGE
 -----
   python autograder.py --submissions_dir ./submissions [OPTIONS]
@@ -22,6 +72,8 @@ USAGE
     --holdout_days    INT   Days of holdout price data to generate (default: 30).
     --rl_episodes     INT   Number of episodes per RL evaluation (default: 20).
     --output          FILE  Output CSV path (default: leaderboard.csv).
+    --pillar          STR   Evaluate only one pillar: ml, lstm, rl, or all (default: all).
+    --dry_run               Check submission structure without running models.
     --verbose               Print detailed per-student results.
 
 SUBMISSION STRUCTURE
@@ -299,7 +351,9 @@ def evaluate_lstm_submission(
     from dl_forecaster import load_lstm_model, evaluate_lstm
 
     try:
-        lstm_dict = load_lstm_model(lstm_path, verbose=False if not verbose else True)
+        # NOTE: load_lstm_model() does not accept a verbose parameter — it always
+        # prints a brief "Loaded from ..." message. This is intentional behavior.
+        lstm_dict = load_lstm_model(lstm_path)
         results = evaluate_lstm(lstm_dict, holdout_test_prices, verbose=False)
         return {
             "mae": results["mae"],
@@ -429,6 +483,8 @@ def run_autograder(
     holdout_days: int = DEFAULT_HOLDOUT_DAYS,
     n_rl_episodes: int = DEFAULT_RL_EPISODES,
     output_csv: str = "leaderboard.csv",
+    pillar: str = "all",
+    dry_run: bool = False,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """Run the full autograder on all submissions.
@@ -439,6 +495,10 @@ def run_autograder(
         holdout_days:    Number of days in holdout price dataset.
         n_rl_episodes:   Episodes per RL evaluation.
         output_csv:      Path to save the leaderboard CSV.
+        pillar:          Which pillar(s) to evaluate: "ml", "lstm", "rl", or "all".
+                         Use for staged deadlines where not all pillars are due together.
+        dry_run:         If True, check submission structure only (no model evaluation).
+                         Useful for confirming correct file names before the deadline.
         verbose:         Print detailed progress.
 
     Returns:
@@ -455,13 +515,28 @@ def run_autograder(
     # ----------------------------------------------------------
     # 1. Generate holdout data (hidden from students)
     # ----------------------------------------------------------
+    import datetime
+
+    # Validate pillar argument
+    valid_pillars = {"ml", "lstm", "rl", "all"}
+    if pillar not in valid_pillars:
+        raise ValueError(f"pillar must be one of {valid_pillars}, got '{pillar}'")
+
+    eval_ml   = pillar in ("ml",   "all")
+    eval_lstm = pillar in ("lstm", "all")
+    eval_rl   = pillar in ("rl",   "all")
+
     print(f"\n{'='*60}")
     print(f"IEOR E4010 — EV Charging Project Autograder")
     print(f"{'='*60}")
+    print(f"Run time:              {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Submissions directory: {submissions_dir}")
-    print(f"Holdout seed: {holdout_seed} (keep confidential)")
-    print(f"Holdout days: {holdout_days}")
-    print(f"RL evaluation episodes: {n_rl_episodes}")
+    print(f"Holdout seed:          {holdout_seed} (keep confidential)")
+    print(f"Holdout days:          {holdout_days}")
+    print(f"Pillar(s) evaluated:   {pillar}")
+    print(f"RL evaluation episodes:{n_rl_episodes}")
+    if dry_run:
+        print(f"Mode:                  DRY RUN (structure check only — no models evaluated)")
     print(f"{'='*60}\n")
 
     cfg = Config()
@@ -481,23 +556,25 @@ def run_autograder(
           f"{len(holdout_test_df)} test hours\n")
 
     # ----------------------------------------------------------
-    # 2. Compute baselines
+    # 2. Compute baselines (skip for dry_run — baselines not needed for structure check)
     # ----------------------------------------------------------
-    print("Computing baseline metrics (this may take a few minutes)...")
-    baselines = compute_baselines(
-        cfg,
-        holdout_train_df,
-        holdout_test_df,
-        holdout_test_prices,
-        holdout_schedules,
-        holdout_price_curve,
-        n_rl_episodes=n_rl_episodes,
-        verbose=verbose,
-    )
-    print(f"\nBaseline Summary:")
-    print(f"  ML  MAE:  ${baselines.get('baseline_ml_mae', float('nan')):.3f}/MWh")
-    print(f"  LSTM MAE: ${baselines.get('baseline_lstm_mae', float('nan')):.3f}/MWh")
-    print(f"  RL cost:  ${baselines.get('baseline_rl_cost', float('nan')):.2f}")
+    baselines = {}
+    if not dry_run:
+        print("Computing baseline metrics (this may take a few minutes)...")
+        baselines = compute_baselines(
+            cfg,
+            holdout_train_df,
+            holdout_test_df,
+            holdout_test_prices,
+            holdout_schedules,
+            holdout_price_curve,
+            n_rl_episodes=n_rl_episodes,
+            verbose=verbose,
+        )
+        print(f"\nBaseline Summary:")
+        print(f"  ML  MAE:  ${baselines.get('baseline_ml_mae', float('nan')):.3f}/MWh")
+        print(f"  LSTM MAE: ${baselines.get('baseline_lstm_mae', float('nan')):.3f}/MWh")
+        print(f"  RL cost:  ${baselines.get('baseline_rl_cost', float('nan')):.2f}")
 
     # ----------------------------------------------------------
     # 3. Discover submission folders
@@ -520,6 +597,29 @@ def run_autograder(
     print(f"\nFound {len(student_dirs)} submission(s).")
 
     # ----------------------------------------------------------
+    # 3b. Dry-run mode: just check file presence, no evaluation
+    # ----------------------------------------------------------
+    if dry_run:
+        print("\n--- DRY RUN: Checking submission structure ---")
+        required = {
+            "ml":   "ml_model.pkl",
+            "lstm": "lstm_model.pth",
+            "rl":   "rl_agent.zip",
+            "info": "student_info.json",
+        }
+        all_ok = True
+        for student_dir in student_dirs:
+            folder_name = student_dir.name
+            missing = [name for key, name in required.items()
+                       if not (student_dir / name).exists()]
+            status = "OK" if not missing else f"MISSING: {missing}"
+            print(f"  {folder_name:30s} {status}")
+            if missing:
+                all_ok = False
+        print(f"\nDry-run complete. {'All submissions complete.' if all_ok else 'Some files missing (see above).'}")
+        return pd.DataFrame()
+
+    # ----------------------------------------------------------
     # 4. Evaluate each student
     # ----------------------------------------------------------
     results = []
@@ -539,6 +639,7 @@ def run_autograder(
         else:
             student_name = folder_name
             student_uni = folder_name
+            print(f"  WARNING: student_info.json not found — using folder name as identifier.")
 
         row = {
             "folder": folder_name,
@@ -548,78 +649,113 @@ def run_autograder(
 
         # --- ML Evaluation ---
         ml_path = student_dir / "ml_model.pkl"
-        if ml_path.exists():
-            print(f"  [ML] Evaluating ml_model.pkl...")
-            ml_metrics = evaluate_ml_submission(
-                str(ml_path), holdout_test_df, cfg, verbose=verbose
-            )
-            row["ml_mae"] = ml_metrics.get("mae", float("nan"))
-            row["ml_rmse"] = ml_metrics.get("rmse", float("nan"))
-            row["ml_r2"] = ml_metrics.get("r2", float("nan"))
-            if "error" in ml_metrics:
-                row["ml_error"] = ml_metrics["error"]
-                print(f"    ERROR: {ml_metrics['error'][:80]}")
+        if eval_ml:
+            if ml_path.exists():
+                print(f"  [ML] Evaluating ml_model.pkl...")
+                ml_metrics = evaluate_ml_submission(
+                    str(ml_path), holdout_test_df, cfg, verbose=verbose
+                )
+                row["ml_mae"] = ml_metrics.get("mae", float("nan"))
+                row["ml_rmse"] = ml_metrics.get("rmse", float("nan"))
+                row["ml_r2"] = ml_metrics.get("r2", float("nan"))
+                if "error" in ml_metrics:
+                    row["ml_error"] = ml_metrics["error"]
+                    print(f"    ERROR: {ml_metrics['error'][:80]}")
+                else:
+                    print(f"    MAE: ${row['ml_mae']:.3f}/MWh  |  "
+                          f"RMSE: ${row['ml_rmse']:.3f}  |  R²: {row['ml_r2']:.4f}")
             else:
-                print(f"    MAE: ${row['ml_mae']:.3f}/MWh  |  "
-                      f"RMSE: ${row['ml_rmse']:.3f}  |  R²: {row['ml_r2']:.4f}")
+                print(f"  [ML] ml_model.pkl not found — skipping.")
+                row["ml_mae"] = float("nan")
+                row["ml_rmse"] = float("nan")
+                row["ml_r2"] = float("nan")
         else:
-            print(f"  [ML] ml_model.pkl not found — skipping.")
+            print(f"  [ML] Skipped (--pillar {pillar})")
             row["ml_mae"] = float("nan")
             row["ml_rmse"] = float("nan")
             row["ml_r2"] = float("nan")
 
         # --- LSTM Evaluation ---
         lstm_path = student_dir / "lstm_model.pth"
-        if lstm_path.exists():
-            print(f"  [LSTM] Evaluating lstm_model.pth...")
-            lstm_metrics = evaluate_lstm_submission(
-                str(lstm_path), holdout_test_prices, verbose=verbose
-            )
-            row["lstm_mae"] = lstm_metrics.get("mae", float("nan"))
-            row["lstm_rmse"] = lstm_metrics.get("rmse", float("nan"))
-            row["lstm_r2"] = lstm_metrics.get("r2", float("nan"))
-            if "error" in lstm_metrics:
-                row["lstm_error"] = lstm_metrics["error"]
-                print(f"    ERROR: {lstm_metrics['error'][:80]}")
+        if eval_lstm:
+            if lstm_path.exists():
+                print(f"  [LSTM] Evaluating lstm_model.pth...")
+                lstm_metrics = evaluate_lstm_submission(
+                    str(lstm_path), holdout_test_prices, verbose=verbose
+                )
+                row["lstm_mae"] = lstm_metrics.get("mae", float("nan"))
+                row["lstm_rmse"] = lstm_metrics.get("rmse", float("nan"))
+                row["lstm_r2"] = lstm_metrics.get("r2", float("nan"))
+                if "error" in lstm_metrics:
+                    row["lstm_error"] = lstm_metrics["error"]
+                    print(f"    ERROR: {lstm_metrics['error'][:80]}")
+                else:
+                    print(f"    MAE: ${row['lstm_mae']:.3f}/MWh  |  "
+                          f"RMSE: ${row['lstm_rmse']:.3f}  |  R²: {row['lstm_r2']:.4f}")
             else:
-                print(f"    MAE: ${row['lstm_mae']:.3f}/MWh  |  "
-                      f"RMSE: ${row['lstm_rmse']:.3f}  |  R²: {row['lstm_r2']:.4f}")
+                print(f"  [LSTM] lstm_model.pth not found — skipping.")
+                row["lstm_mae"] = float("nan")
+                row["lstm_rmse"] = float("nan")
+                row["lstm_r2"] = float("nan")
         else:
-            print(f"  [LSTM] lstm_model.pth not found — skipping.")
+            print(f"  [LSTM] Skipped (--pillar {pillar})")
             row["lstm_mae"] = float("nan")
             row["lstm_rmse"] = float("nan")
             row["lstm_r2"] = float("nan")
 
         # --- RL Evaluation ---
         rl_path = student_dir / "rl_agent.zip"
-        if rl_path.exists():
-            print(f"  [RL] Evaluating rl_agent.zip ({n_rl_episodes} episodes)...")
-            rl_metrics = evaluate_rl_submission(
-                str(rl_path), cfg,
-                holdout_schedules, holdout_price_curve,
-                n_episodes=n_rl_episodes,
-                verbose=verbose,
-            )
-            row["rl_cost"] = rl_metrics.get("net_cost_mean", float("nan"))
-            row["rl_cost_std"] = rl_metrics.get("net_cost_std", float("nan"))
-            row["rl_targets_pct"] = rl_metrics.get("targets_met_mean", float("nan"))
-            row["rl_v2g_revenue"] = rl_metrics.get("v2g_revenue_mean", float("nan"))
-            if "error" in rl_metrics:
-                row["rl_error"] = rl_metrics["error"]
-                print(f"    ERROR: {rl_metrics['error'][:80]}")
+        if eval_rl:
+            if rl_path.exists():
+                print(f"  [RL] Evaluating rl_agent.zip ({n_rl_episodes} episodes)...")
+                rl_metrics = evaluate_rl_submission(
+                    str(rl_path), cfg,
+                    holdout_schedules, holdout_price_curve,
+                    n_episodes=n_rl_episodes,
+                    verbose=verbose,
+                )
+                row["rl_cost"] = rl_metrics.get("net_cost_mean", float("nan"))
+                row["rl_cost_std"] = rl_metrics.get("net_cost_std", float("nan"))
+                row["rl_targets_pct"] = rl_metrics.get("targets_met_mean", float("nan"))
+                row["rl_v2g_revenue"] = rl_metrics.get("v2g_revenue_mean", float("nan"))
+                if "error" in rl_metrics:
+                    row["rl_error"] = rl_metrics["error"]
+                    print(f"    ERROR: {rl_metrics['error'][:80]}")
+                else:
+                    print(f"    Net cost: ${row['rl_cost']:.2f} ± ${row['rl_cost_std']:.2f}  |  "
+                          f"Targets: {row['rl_targets_pct']:.1f}/{cfg.fleet.num_evs}")
             else:
-                print(f"    Net cost: ${row['rl_cost']:.2f} ± ${row['rl_cost_std']:.2f}  |  "
-                      f"Targets: {row['rl_targets_pct']:.1f}/{cfg.fleet.num_evs}")
+                print(f"  [RL] rl_agent.zip not found — skipping.")
+                row["rl_cost"] = float("nan")
+                row["rl_cost_std"] = float("nan")
+                row["rl_targets_pct"] = float("nan")
         else:
-            print(f"  [RL] rl_agent.zip not found — skipping.")
+            print(f"  [RL] Skipped (--pillar {pillar})")
             row["rl_cost"] = float("nan")
             row["rl_cost_std"] = float("nan")
             row["rl_targets_pct"] = float("nan")
 
         # --- Combined Score ---
         row["combined_score"] = compute_combined_score(row, baselines)
-        print(f"  Combined score: {row['combined_score']:.4f}  "
-              f"({'BEATS BASELINE ✓' if row['combined_score'] > 1.0 else 'below baseline'})")
+        beat = row["combined_score"] > 1.0
+        if not np.isnan(row["combined_score"]):
+            print(f"  Combined score: {row['combined_score']:.4f}  "
+                  f"({'BEATS BASELINE ✓' if beat else 'below baseline'})")
+
+        # --- Save per-student JSON (useful for detailed CA records) ---
+        student_json_path = student_dir / "autograder_result.json"
+        try:
+            result_to_save = {k: (float(v) if isinstance(v, float) else v)
+                              for k, v in row.items()}
+            result_to_save["baselines"] = {
+                k: (float(v) if isinstance(v, float) else v)
+                for k, v in baselines.items()
+            }
+            result_to_save["autograder_timestamp"] = __import__('datetime').datetime.now().isoformat()
+            with open(student_json_path, "w") as f:
+                json.dump(result_to_save, f, indent=2)
+        except Exception as e:
+            pass  # Non-critical — don't fail the whole run
 
         results.append(row)
 
@@ -713,6 +849,16 @@ def main():
         help="Output CSV path (default: leaderboard.csv)",
     )
     parser.add_argument(
+        "--pillar", default="all", choices=["ml", "lstm", "rl", "all"],
+        help="Evaluate only one pillar (ml/lstm/rl) or all (default: all). "
+             "Useful for staged deadlines.",
+    )
+    parser.add_argument(
+        "--dry_run", action="store_true",
+        help="Check submission file structure only — do not run models. "
+             "Run this before the deadline to catch missing files.",
+    )
+    parser.add_argument(
         "--verbose", action="store_true",
         help="Print detailed per-student evaluation output",
     )
@@ -725,6 +871,8 @@ def main():
         holdout_days=args.holdout_days,
         n_rl_episodes=args.rl_episodes,
         output_csv=args.output,
+        pillar=args.pillar,
+        dry_run=args.dry_run,
         verbose=args.verbose,
     )
 
